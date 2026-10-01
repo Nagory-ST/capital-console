@@ -1,0 +1,44 @@
+name: Rappel ordre mensuel
+
+on:
+  schedule:
+    - cron: "0 8 6 * *"        # le 6 de chaque mois, 10:00 Paris
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scripts/requirements.txt
+
+      - name: Un ordre d'achat existe-t-il ce mois-ci ?
+        id: check
+        continue-on-error: true
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: python scripts/sync.py --check-order
+
+      - name: Push sur le téléphone (ntfy)
+        if: steps.check.outcome == 'failure' && vars.NTFY_TOPIC != ''
+        run: |
+          curl -s -H "Title: Ordre WPEA pas passé" \
+               -H "Priority: high" -H "Tags: warning" \
+               -d "On est le $(date +%d/%m), aucun achat WPEA enregistré ce mois. 150 € → ~21 parts, cours limité." \
+               "https://ntfy.sh/${{ vars.NTFY_TOPIC }}"
+
+      - name: Sinon, ouvrir une issue
+        if: steps.check.outcome == 'failure' && vars.NTFY_TOPIC == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "Ordre WPEA du mois pas passé" \
+            --body "Aucun ordre d'achat enregistré dans Notion ce mois-ci. Passer l'ordre (150 €, cours limité) puis l'ajouter dans **Ordres PEA**." \
+            --label reminder || true
