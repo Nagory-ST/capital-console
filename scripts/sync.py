@@ -25,9 +25,10 @@ NOTION_VERSION = "2022-06-28"
 API = "https://api.notion.com/v1"
 
 # IDs des bases (page Notion "Plan Capital")
-DB_SUIVI = "1f90efd2cd34436eb1f23d15b8cb92dc"
-DB_ORDRES = "ee18ae3e8acb41f9a25e3c48f33748f7"
-DB_WATCHLIST = "b085c0914e4947bca54f58b4662bc987"
+# (database_id, data_source_id)
+DB_SUIVI = ("1f90efd2cd34436eb1f23d15b8cb92dc", "5b9b5fb8-8b45-4f09-aff7-6a893be98530")
+DB_ORDRES = ("ee18ae3e8acb41f9a25e3c48f33748f7", "8a486737-d4b6-475e-a64a-feff9364d4a9")
+DB_WATCHLIST = ("b085c0914e4947bca54f58b4662bc987", "860b4e9a-c3eb-41b0-a5c1-aeb8367103a1")
 
 # Support Notion → ticker Yahoo Finance
 TICKERS = {
@@ -66,30 +67,53 @@ def encrypt(plaintext: bytes, passphrase: str) -> dict:
 
 # ---------- Notion ----------
 
-def notion_headers():
+def notion_headers(version=NOTION_VERSION):
     if not NOTION_TOKEN:
-        sys.exit("NOTION_TOKEN manquant")
+        sys.exit("[erreur] NOTION_TOKEN manquant : Settings → Secrets and variables → Actions → NOTION_TOKEN")
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_VERSION,
+        "Notion-Version": version,
         "Content-Type": "application/json",
     }
 
 
-def query_db(db_id):
-    """Retourne toutes les pages d'une base (pagination gérée)."""
+def _paginate(url, version):
     rows, cursor = [], None
     while True:
         body = {"page_size": 100}
         if cursor:
             body["start_cursor"] = cursor
-        r = requests.post(f"{API}/databases/{db_id}/query", headers=notion_headers(), json=body, timeout=30)
+        r = requests.post(url, headers=notion_headers(version), json=body, timeout=30)
+        if r.status_code == 401:
+            sys.exit(
+                "[erreur] Notion refuse le jeton (401).\n"
+                "  → Le secret GitHub NOTION_TOKEN n'est pas (ou plus) valide : jeton régénéré, connexion supprimée,\n"
+                "    ou mauvaise valeur collée. Dans Notion : notion.so/profile/integrations → capital-console → Afficher\n"
+                "    le jeton (ntn_…), puis GitHub → Settings → Secrets → NOTION_TOKEN → Update."
+            )
+        if r.status_code == 404:
+            return None
         r.raise_for_status()
         data = r.json()
         rows.extend(data["results"])
         if not data.get("has_more"):
             return rows
         cursor = data["next_cursor"]
+
+
+def query_db(db):
+    """Toutes les pages d'une base. API classique (databases) puis nouvelle (data_sources)."""
+    db_id, ds_id = db
+    rows = _paginate(f"{API}/databases/{db_id}/query", "2022-06-28")
+    if rows is None:
+        rows = _paginate(f"{API}/data_sources/{ds_id}/query", "2025-09-03")
+    if rows is None:
+        sys.exit(
+            f"[erreur] Notion renvoie 404 pour la base {db_id}.\n"
+            "  → L'intégration n'a pas accès à la page. Notion : page « Plan Capital — 20 → 30 ans »\n"
+            "    → … → Connexions → ajouter capital-console (sur la page HUB)."
+        )
+    return rows
 
 
 def prop(page, name):
@@ -117,7 +141,9 @@ def prop(page, name):
 
 
 def is_template(title):
-    return (title or "").upper().startswith("MODÈLE") or (title or "").upper().startswith("MODELE")
+    """Lignes à ignorer : modèles et ordres prévus (⏳) pas encore exécutés."""
+    t = (title or "").strip()
+    return t.upper().startswith(("MODÈLE", "MODELE")) or t.startswith("⏳")
 
 
 # ---------- Cours ----------
